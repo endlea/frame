@@ -16,6 +16,7 @@ extern uint16_t fbBackup[];
 extern int browserScrollY;
 extern int optionsScrollY;
 extern String playingName;
+extern bool clockSyncEnabled;
 
 // =================== Button instances ===================
 // Layout note: with the redesign, the title is now a thin TITLE_BAND_H strip
@@ -191,6 +192,31 @@ static void drawOptionsRow(int yViewport, const char *label, bool isActive) {
   tft.print(label);
 }
 
+static void drawOptionsToggleRow(int yViewport, const char *label, bool isOn) {
+  if (yViewport >= SCREEN_H || yViewport + OPTIONS_ITEM_H <= HEADER_H) return;
+
+  tft.fillRect(0, yViewport, SCREEN_W, OPTIONS_ITEM_H, COLOR_BG);
+  tft.drawFastHLine(0, yViewport + OPTIONS_ITEM_H - 1, SCREEN_W, COLOR_DIVIDER);
+
+  tft.setTextColor(COLOR_FG);
+  tft.setTextSize(2);
+  tft.setCursor(15, yViewport + (OPTIONS_ITEM_H - 16) / 2);
+  tft.print(label);
+
+  const int swW = 46;
+  const int swH = 22;
+  const int swX = SCREEN_W - swW - 15;
+  const int swY = yViewport + (OPTIONS_ITEM_H - swH) / 2;
+
+  uint16_t outline = isOn ? COLOR_ACCENT : COLOR_DIM;
+  uint16_t knob    = isOn ? COLOR_ACCENT : COLOR_DIM;
+
+  tft.drawRoundRect(swX, swY, swW, swH, swH / 2, outline);
+
+  int knobX = isOn ? swX + swW - swH + 2 : swX + 2;
+  tft.fillCircle(knobX + swH / 2 - 2, swY + swH / 2, 7, knob);
+}
+
 void drawOptions() {
   tft.fillScreen(COLOR_BG);
 
@@ -215,6 +241,13 @@ void drawOptions() {
                    uiColorName((UiColor)i),
                    (UiColor)i == currentUiColor);
   }
+
+  // CLOCK section label.
+  drawSectionLabel("CLOCK", listTop + OPTIONS_COLOR_BOTTOM - optionsScrollY);
+
+  drawOptionsToggleRow(listTop + OPTIONS_CLOCK_TOP - optionsScrollY,
+                       "CLOCK SYNC",
+                       clockSyncEnabled);
 
   // Header (drawn last so any rows that scrolled under it get clipped away).
   tft.fillRect(0, 0, SCREEN_W, HEADER_H, COLOR_BG);
@@ -344,4 +377,45 @@ void drawSpeedScreen(float baseBpm, float currentBpm, float speedMul) {
   tft.fillRoundRect(76, 288, 88, 24, 7, COLOR_BG);
   tft.drawRoundRect(76, 288, 88, 24, 7, COLOR_ACCENT);
   drawCenteredText("RESET", SCREEN_W / 2, 300, 1, COLOR_ACCENT);
+}
+
+void drawClockSpeedScreen(float baseBpm, float clockBpmValue, float ratio, const char *ratioLabel) {
+  const int sheetY = 190;
+  const int sheetH = SCREEN_H - sheetY;
+
+  tft.fillRoundRect(8, sheetY, SCREEN_W - 16, sheetH - 8, 12, COLOR_BG);
+  tft.drawRoundRect(8, sheetY, SCREEN_W - 16, sheetH - 8, 12, COLOR_DIVIDER);
+
+  char bpmBuf[28];
+  snprintf(bpmBuf, sizeof(bpmBuf), "SYNC %.0f BPM", clockBpmValue);
+  drawCenteredText(bpmBuf, SCREEN_W / 2, sheetY + 24, 2, COLOR_ACCENT);
+
+  char subBuf[36];
+  snprintf(subBuf, sizeof(subBuf), "original %.0f BPM", baseBpm);
+  drawCenteredText(subBuf, SCREEN_W / 2, sheetY + 48, 1, COLOR_DIM);
+
+  // Ratio picker: clean, readable, no overlapping labels.
+  tft.drawRoundRect(36, 244, 168, 42, 10, COLOR_DIVIDER);
+
+  drawCenteredText("<", 58, 265, 2, COLOR_DIM);
+  drawCenteredText(ratioLabel, SCREEN_W / 2, 265, 2, COLOR_ACCENT);
+  drawCenteredText(">", 182, 265, 2, COLOR_DIM);
+
+  drawCenteredText("tap outside to close", SCREEN_W / 2, 304, 1, COLOR_DIM);
+}
+
+void drawSyncToast(const char *text) {
+  tft.setTextSize(2);
+
+  int16_t w = strlen(text) * 6 * 2;
+  int16_t x = SCREEN_W / 2 - w / 2;
+  int16_t y = SCREEN_H / 2 - 8;
+
+  tft.setTextColor(COLOR_BG);
+  tft.setCursor(x + 1, y + 1);
+  tft.print(text);
+
+  tft.setTextColor(COLOR_ACCENT);
+  tft.setCursor(x, y);
+  tft.print(text);
 }

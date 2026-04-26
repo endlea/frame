@@ -91,6 +91,27 @@ static bool browserReturnToPlayer = false;
 static bool speedUiDirty = false;
 static uint32_t lastSpeedUiDrawMs = 0;
 
+bool clockSyncEnabled = true;
+
+static bool stableClockActive = false;
+static bool prevStableClockActive = false;
+static uint32_t clockLostAtMs = 0;
+static uint32_t syncToastUntilMs = 0;
+static const char *syncToastText = "SYNC";
+static bool syncToastDrawn = false;
+static uint32_t lastSyncToastDrawMs = 0;
+
+static const float syncRatios[CLOCK_SYNC_RATIO_COUNT] = {
+  0.25f, 0.5f, 1.0f, 2.0f, 4.0f
+};
+
+static const char *syncRatioLabels[CLOCK_SYNC_RATIO_COUNT] = {
+  "/4", "/2", "1x", "2x", "4x"
+};
+
+// Not per-GIF. Always resets to default on GIF change / clock loss.
+static uint8_t syncRatioIdx = 2;
+
 // Last time the menu animation advanced a frame (millis()).
 static uint32_t lastSaverFrame = 0;
 
@@ -152,6 +173,16 @@ static void redrawSpeedUi(bool force);
 static bool playGifTimed(bool redrawSpeedUi);
 static void restartCurrentGifClean();
 
+static bool shouldUseClockSync();
+static float currentSyncRatio();
+static const char *currentSyncRatioLabel();
+static void stepCurrentSyncRatio(int dir);
+static void drawPlayerToastIfNeeded();
+static void updateStableClockState();
+static void resetSpeedDefaults();
+
+static void forceGifRedrawNoRestart();
+
 // =================== Setup / Loop ===================
 void setup() {
   tft.begin(SPI_CLOCK);
@@ -178,6 +209,7 @@ void setup() {
     gifSpeedMul[i] = 1.0f;
     gifDetectedBpm[i] = 120.0f;
     gifBpmKnown[i] = false;
+    // gifSyncRatioIdx[i] = 2;  // default = 1x
   }
 
   // Initialise the saver state ONCE at boot. enterMenu() and the idle/wake
@@ -192,6 +224,7 @@ void setup() {
 
 void loop() {
   updateTouch();
+  updateStableClockState();
 
   switch (state) {
     case S_MENU: {
@@ -257,9 +290,12 @@ void loop() {
             browserReturnToPlayer = false;
             state = S_PLAYER;
 
-            // Browser overwrote the framebuffer, so let the GIF redraw cleanly.
-            tft.fillScreen(COLOR_BG);
-            gifNextFrameMs = 0;
+            // Browser overwrote the framebuffer. Restore the last clean GIF frame
+            // instead of clearing to BG, otherwise transparent GIFs rebuild in chunks.
+            memcpy(tft.getFrameBuffer(), fbBackup, SCREEN_W * SCREEN_H * 2);
+            tft.updateScreen();
+
+            gifNextFrameMs = millis();
           } else {
             browserReturnToPlayer = false;
             enterMenu();
@@ -278,6 +314,8 @@ void loop() {
     case S_PLAYER:
       if (gifOpened) {
         playGifTimed(false);
+        memcpy(fbBackup, tft.getFrameBuffer(), SCREEN_W * SCREEN_H * 2);
+        drawPlayerToastIfNeeded();
       }
       if (touch.tapped) enterOverlay();
       break;
@@ -360,6 +398,18 @@ void loop() {
               drawOptions();
             }
           }
+
+          // CLOCK section
+          if (contentY >= OPTIONS_CLOCK_TOP && contentY < OPTIONS_CLOCK_BOTTOM) {
+            clockSyncEnabled = !clockSyncEnabled;
+
+            // Turning clock sync off returns speed/ratio to defaults.
+            if (!clockSyncEnabled) {
+              syncRatioIdx = 2;
+            }
+
+            drawOptions();
+          }
         }
       }
       break;
@@ -369,31 +419,57 @@ void loop() {
         playGifTimed(true);
       }
 
-      if (touch.dragged) {
-        if (touch.curY >= SPEED_SLIDER_Y - 28 &&
-            touch.curY <= SPEED_SLIDER_Y + SPEED_SLIDER_H + 28) {
-          setCurrentSpeedFromSliderX(touch.curX);
-          speedUiDirty = true;
+      if (shouldUseClockSync()) {
+        if (touch.tapped) {
+          // Ratio left arrow.
+          if (touch.tapY >= 244 && touch.tapY <= 286 && touch.tapX >= 36 && touch.tapX < 84) {
+            stepCurrentSyncRatio(-1);
+            speedUiDirty = true;
+            redrawSpeedUi(true);
+          }
+          // Ratio right arrow.
+          else if (touch.tapY >= 244 && touch.tapY <= 286 && touch.tapX > 156 && touch.tapX <= 204) {
+            stepCurrentSyncRatio(1);
+            speedUiDirty = true;
+            redrawSpeedUi(true);
+          }
+          // Any tap outside ratio controls = DONE.
+          else {
+            state = S_PLAYER;
+            speedUiDirty = false;
+            forceGifRedrawNoRestart();
+            break;
+          }
         }
-      } else if (touch.tapped) {
-        // RESET button.
-        if (touch.tapX >= 76 && touch.tapX < 164 &&
-            touch.tapY >= 288 && touch.tapY < 312) {
-          resetCurrentSpeed();
-          speedUiDirty = true;
-          redrawSpeedUi(true);
-        }
-        // Slider tap.
-        else if (touch.tapY >= SPEED_SLIDER_Y - 28 &&
-                touch.tapY <= SPEED_SLIDER_Y + SPEED_SLIDER_H + 28) {
-          setCurrentSpeedFromSliderX(touch.tapX);
-          speedUiDirty = true;
-          redrawSpeedUi(true);
-        }
-        // Any tap outside the speed controls = DONE.
-        else {
-          state = S_PLAYER;
-          restartCurrentGifClean();
+      } else {
+        if (touch.dragged) {
+          if (touch.curY >= SPEED_SLIDER_Y - 28 &&
+              touch.curY <= SPEED_SLIDER_Y + SPEED_SLIDER_H + 28) {
+            setCurrentSpeedFromSliderX(touch.curX);
+            speedUiDirty = true;
+          }
+        } else if (touch.tapped) {
+          // RESET button.
+          if (touch.tapX >= 76 && touch.tapX < 164 &&
+              touch.tapY >= 288 && touch.tapY < 312) {
+            resetCurrentSpeed();
+            speedUiDirty = true;
+            redrawSpeedUi(true);
+          }
+          // Slider tap.
+          else if (touch.tapY >= SPEED_SLIDER_Y - 28 &&
+                   touch.tapY <= SPEED_SLIDER_Y + SPEED_SLIDER_H + 28) {
+            setCurrentSpeedFromSliderX(touch.tapX);
+            speedUiDirty = true;
+            redrawSpeedUi(true);
+          }
+          // Any tap outside the speed controls = DONE.
+          else {
+            state = S_PLAYER;
+            speedUiDirty = false;
+            forceGifRedrawNoRestart();
+            break;
+          }
         }
       }
 
@@ -453,11 +529,8 @@ static void enterPlayer(const String &name) {
     gifOpened = true;
     playingName = name;     // remember which row to highlight in the browser
 
-    int idx = currentGifIndex();
-    if (idx >= 0) {
-      // Speed is per-current-selection, not persistent between GIF picks.
-      gifSpeedMul[idx] = 1.0f;
-    }
+    // No per-GIF speed memory. Every selected GIF starts from defaults.
+    resetSpeedDefaults();
 
     gifNextFrameMs = 0;
     gifLoopMs = 0;
@@ -540,6 +613,18 @@ static float currentSpeedMul() {
   int idx = currentGifIndex();
   if (idx < 0) return 1.0f;
 
+  if (shouldUseClockSync()) {
+    float base = currentBaseBpm();
+    if (base < 1.0f) base = 120.0f;
+
+    float mul = (clockBpm() * currentSyncRatio()) / base;
+
+    if (mul < GIF_SPEED_MIN) mul = GIF_SPEED_MIN;
+    if (mul > GIF_SPEED_MAX) mul = GIF_SPEED_MAX;
+
+    return mul;
+  }
+
   if (gifSpeedMul[idx] < GIF_SPEED_MIN) gifSpeedMul[idx] = GIF_SPEED_MIN;
   if (gifSpeedMul[idx] > GIF_SPEED_MAX) gifSpeedMul[idx] = GIF_SPEED_MAX;
 
@@ -576,17 +661,20 @@ static void redrawSpeedUi(bool force) {
 
   uint32_t now = millis();
 
-  // Throttle only touch-driven redraws. GIF-frame redraws are handled inside
-  // playGifTimed(true), where we also refresh fbBackup safely.
   if (!force && (now - lastSpeedUiDrawMs) < 45) return;
 
-  // Restore clean latest GIF frame before redrawing the sheet.
-  // This prevents repeated slider redraws from stacking artifacts.
   memcpy(tft.getFrameBuffer(), fbBackup, SCREEN_W * SCREEN_H * 2);
 
-  drawSpeedScreen(currentBaseBpm(),
-                  currentBaseBpm() * currentSpeedMul(),
-                  currentSpeedMul());
+  if (shouldUseClockSync()) {
+    drawClockSpeedScreen(currentBaseBpm(),
+                         clockBpm(),
+                         currentSyncRatio(),
+                         currentSyncRatioLabel());
+  } else {
+    drawSpeedScreen(currentBaseBpm(),
+                    currentBaseBpm() * currentSpeedMul(),
+                    currentSpeedMul());
+  }
 
   tft.updateScreen();
 
@@ -600,6 +688,14 @@ static bool playGifTimed(bool redrawSpeedUiAfterFrame) {
   uint32_t now = millis();
   if (gifNextFrameMs != 0 && (int32_t)(now - gifNextFrameMs) < 0) {
     return true;
+  }
+
+  // IMPORTANT:
+  // In speed UI mode the framebuffer currently contains the bottom sheet.
+  // Transparent / partial GIF frames would otherwise decode over that UI and
+  // bake its pixels into the animation. Restore the last clean GIF frame first.
+  if (redrawSpeedUiAfterFrame) {
+    memcpy(tft.getFrameBuffer(), fbBackup, SCREEN_W * SCREEN_H * 2);
   }
 
   int frameDelayMs = 0;
@@ -618,21 +714,29 @@ static bool playGifTimed(bool redrawSpeedUiAfterFrame) {
     gifNextFrameMs = millis() + scaledDelay;
 
     if (redrawSpeedUiAfterFrame) {
-      // IMPORTANT:
-      // GIFDraw has just produced a clean GIF frame.
-      // Save it BEFORE drawing the speed sheet, so exiting speed can restore
-      // the latest decoder-consistent frame instantly.
+      // Save clean GIF frame BEFORE drawing speed UI.
       memcpy(fbBackup, tft.getFrameBuffer(), SCREEN_W * SCREEN_H * 2);
 
-      drawSpeedScreen(currentBaseBpm(),
-                      currentBaseBpm() * currentSpeedMul(),
-                      currentSpeedMul());
+      if (shouldUseClockSync()) {
+        drawClockSpeedScreen(currentBaseBpm(),
+                             clockBpm(),
+                             currentSyncRatio(),
+                             currentSyncRatioLabel());
+      } else {
+        drawSpeedScreen(currentBaseBpm(),
+                        currentBaseBpm() * currentSpeedMul(),
+                        currentSpeedMul());
+      }
 
       tft.updateScreen();
 
       speedUiDirty = false;
       lastSpeedUiDrawMs = millis();
     } else {
+      if (syncToastUntilMs != 0 && (int32_t)(millis() - syncToastUntilMs) < 0) {
+        drawSyncToast(syncToastText);
+      }
+
       tft.updateScreen();
     }
 
@@ -675,6 +779,7 @@ static void restartCurrentGifClean() {
   closeGifFile();
 
   tft.fillScreen(COLOR_BG);
+  tft.updateScreen();
 
   gifNextFrameMs = 0;
   gifLoopMs = 0;
@@ -682,5 +787,116 @@ static void restartCurrentGifClean() {
 
   if (gif.open(currentFile.c_str(), GIFOpen, GIFClose, GIFRead, GIFSeek, GIFDraw)) {
     gifOpened = true;
+
+    // Immediately draw first frame into a clean canvas.
+    int frameDelayMs = 0;
+    int playRet = gif.playFrame(false, &frameDelayMs);
+
+    if (playRet > 0) {
+      if (frameDelayMs <= 0) frameDelayMs = 33;
+
+      float mul = currentSpeedMul();
+      int scaledDelay = (int)((float)frameDelayMs / mul);
+      if (scaledDelay < 5) scaledDelay = 5;
+
+      gifNextFrameMs = millis() + scaledDelay;
+      tft.updateScreen();
+    } else {
+      gifNextFrameMs = millis();
+    }
   }
+}
+
+static bool shouldUseClockSync() {
+  return clockSyncEnabled && stableClockActive;
+}
+
+static float currentSyncRatio() {
+  if (syncRatioIdx >= CLOCK_SYNC_RATIO_COUNT) syncRatioIdx = 2;
+  return syncRatios[syncRatioIdx];
+}
+
+static const char *currentSyncRatioLabel() {
+  if (syncRatioIdx >= CLOCK_SYNC_RATIO_COUNT) syncRatioIdx = 2;
+  return syncRatioLabels[syncRatioIdx];
+}
+
+static void stepCurrentSyncRatio(int dir) {
+  int r = syncRatioIdx;
+  r += dir;
+
+  if (r < 0) r = 0;
+  if (r >= CLOCK_SYNC_RATIO_COUNT) r = CLOCK_SYNC_RATIO_COUNT - 1;
+
+  syncRatioIdx = (uint8_t)r;
+}
+
+static void drawPlayerToastIfNeeded() {
+  if (syncToastUntilMs == 0) return;
+
+  if ((int32_t)(millis() - syncToastUntilMs) >= 0) {
+    syncToastUntilMs = 0;
+    syncToastDrawn = false;
+    lastSyncToastDrawMs = 0;
+  }
+}
+
+static void updateStableClockState() {
+  bool rawClock = clockActive();
+
+  if (rawClock) {
+    stableClockActive = true;
+    clockLostAtMs = 0;
+  } else if (stableClockActive) {
+    if (clockLostAtMs == 0) clockLostAtMs = millis();
+
+    // Hysteresis: don't drop sync UI on one missed/late pulse.
+    if (millis() - clockLostAtMs > 250) {
+      stableClockActive = false;
+      clockLostAtMs = 0;
+
+      syncRatioIdx = 2;
+
+      if (clockSyncEnabled && state == S_PLAYER) {
+        syncToastText = "SYNC OFF";
+        syncToastUntilMs = millis() + 1600;
+        syncToastDrawn = false;
+        lastSyncToastDrawMs = 0;
+      }
+
+      if (state == S_SPEED) {
+        speedUiDirty = true;
+        redrawSpeedUi(true);
+      }
+    }
+  }
+
+  if (clockSyncEnabled && stableClockActive && !prevStableClockActive && state == S_PLAYER) {
+    syncToastText = "SYNC ON";
+    syncToastUntilMs = millis() + 1600;
+    syncToastDrawn = false;
+    lastSyncToastDrawMs = 0;
+  }
+
+  prevStableClockActive = stableClockActive;
+}
+
+static void resetSpeedDefaults() {
+  int idx = currentGifIndex();
+
+  if (idx >= 0) {
+    gifSpeedMul[idx] = 1.0f;
+  }
+
+  syncRatioIdx = 2;
+}
+
+static void forceGifRedrawNoRestart() {
+  // Restore latest clean GIF frame saved before drawing the speed sheet.
+  // No fillScreen/fillRect here — bright GIFs show black flashes otherwise.
+  memcpy(tft.getFrameBuffer(), fbBackup, SCREEN_W * SCREEN_H * 2);
+  tft.updateScreen();
+
+  speedUiDirty = false;
+  gifNextFrameMs = millis();
 }

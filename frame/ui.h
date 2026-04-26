@@ -32,5 +32,7 @@ void drawBrowser();
 void drawOverlay();
 void drawOptions();
 void drawSpeedScreen(float baseBpm, float currentBpm, float speedMul);
+void drawClockSpeedScreen(float baseBpm, float clockBpm, float ratio, const char *ratioLabel);
+void drawSyncToast(const char *text);
 
 void dimFrameBuffer();

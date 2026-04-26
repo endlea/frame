@@ -30,56 +30,49 @@
 #include "config.h"
 #include "clock_input.h"
 
-// ---- Tunables ----
-// Length of the timestamp ring. N+1 timestamps → N intervals between them.
-// We only use the most recent interval for the BPM readout (max-snappy: tempo
-// changes show up on the very next pulse). The ring is kept at 2 just so we
-// always have one prev timestamp to subtract from. Pamela-class digital
-// clocks have ≤ ±1 ms jitter, way below the BPM display granularity, so no
-// smoothing is needed for a clean readout.
-static const int N_INTERVALS = 2;
+static volatile uint32_t lastPulseMs = 0;
+static volatile uint32_t intervalMs = 0;
+static volatile bool newInterval = false;
 
-// ---- ISR-shared state ----
-// Ring of millis() at each accepted rising edge, oldest → newest.
-static volatile uint32_t pulseTimes[N_INTERVALS + 1];
-// Index of the newest entry in pulseTimes.
-static volatile uint8_t  pulseHead  = 0;
-// Total accepted pulses, capped at N_INTERVALS+1 (we only need to know
-// whether the ring is fully populated).
-static volatile uint8_t  pulseCount = 0;
+static float bpmFast = 0.0f;
+static float candidateBpm = 0.0f;
+static uint8_t candidateCount = 0;
 
-// ---- ISR ----
 static void onClockPulse() {
-  uint32_t now  = millis();
-  uint32_t prev = pulseTimes[pulseHead];
+  uint32_t now = millis();
 
-  // Debounce: ignore pulses that come too soon after the last one.
-  if (pulseCount > 0 && (now - prev) < CLOCK_DEBOUNCE_MS) return;
+  if (lastPulseMs != 0) {
+    uint32_t dt = now - lastPulseMs;
 
-  uint8_t next = (uint8_t)((pulseHead + 1) % (N_INTERVALS + 1));
-  pulseTimes[next] = now;
-  pulseHead = next;
-  if (pulseCount < (uint8_t)(N_INTERVALS + 1)) pulseCount++;
+    if (dt < CLOCK_DEBOUNCE_MS) return;
+
+    intervalMs = dt;
+    newInterval = true;
+  }
+
+  lastPulseMs = now;
 }
 
 void initClockInput() {
-  // External divider already biases the pin — no internal pull-up needed.
   pinMode(CLOCK_INPUT_PIN, INPUT);
 
-  pulseHead  = 0;
-  pulseCount = 0;
-  for (int i = 0; i <= N_INTERVALS; i++) pulseTimes[i] = 0;
+  lastPulseMs = 0;
+  intervalMs = 0;
+  newInterval = false;
 
-  attachInterrupt(digitalPinToInterrupt(CLOCK_INPUT_PIN),
-                  onClockPulse, RISING);
+  bpmFast = 0.0f;
+  candidateBpm = 0.0f;
+  candidateCount = 0;
+
+  attachInterrupt(digitalPinToInterrupt(CLOCK_INPUT_PIN), onClockPulse, RISING);
 }
 
 uint32_t clockMsSinceLastPulse() {
   noInterrupts();
-  uint8_t  cnt  = pulseCount;
-  uint32_t last = pulseTimes[pulseHead];
+  uint32_t last = lastPulseMs;
   interrupts();
-  if (cnt == 0) return UINT32_MAX;
+
+  if (last == 0) return UINT32_MAX;
   return millis() - last;
 }
 
@@ -87,57 +80,100 @@ bool clockActive() {
   uint32_t since = clockMsSinceLastPulse();
   if (since == UINT32_MAX) return false;
 
-  // Adaptive timeout: declare the clock dead ~1.5 beats after the last pulse
-  // at the currently detected tempo. This way the indicator disappears
-  // promptly when the clock stops, regardless of BPM, without flickering
-  // between pulses at fast tempos.
-  //   * floor 400 ms — keeps tempos above ~225 BPM from killing the indicator
-  //     in the gap between two consecutive pulses
-  //   * ceiling CLOCK_TIMEOUT_MS — also used as fallback when we don't have
-  //     a tempo yet (only one pulse seen so far)
-  float bpm = clockBpm();
-  uint32_t timeout;
-  if (bpm > 1.0f) {
-    timeout = (uint32_t)(60000.0f / bpm) * 3 / 2;
-    if (timeout < 400) timeout = 400;
-    if (timeout > CLOCK_TIMEOUT_MS) timeout = CLOCK_TIMEOUT_MS;
-  } else {
-    timeout = CLOCK_TIMEOUT_MS;
+  if (bpmFast < 1.0f) {
+    return since < 700;
   }
-  return since < timeout;
+
+  uint32_t beatMs = (uint32_t)(60000.0f / bpmFast);
+  uint32_t timeout = beatMs * 2;
+
+  if (timeout < 350) timeout = 350;
+  if (timeout > CLOCK_TIMEOUT_MS) timeout = CLOCK_TIMEOUT_MS;
+
+  bool active = since < timeout;
+
+  if (!active) {
+    // Fully reset detector after clock loss.
+    bpmFast = 0.0f;
+    candidateBpm = 0.0f;
+    candidateCount = 0;
+  }
+
+  return active;
 }
 
 float clockBpm() {
-  // Atomically grab the two most recent timestamps. We only need the latest
-  // interval — that's what makes the readout react on the very next pulse.
+  bool got = false;
+  uint32_t dt = 0;
+
   noInterrupts();
-  uint8_t  cnt  = pulseCount;
-  uint8_t  head = pulseHead;
-  uint32_t last = pulseTimes[head];
-  uint32_t prev = pulseTimes[(head + (N_INTERVALS + 1) - 1) % (N_INTERVALS + 1)];
+  if (newInterval) {
+    newInterval = false;
+    got = true;
+    dt = intervalMs;
+  }
   interrupts();
 
-  if (cnt < 2) return 0.0f;
-  uint32_t dt = last - prev;
-  if (dt == 0) return 0.0f;
-  return 60000.0f / (float)dt;
+  if (got && dt >= CLOCK_DEBOUNCE_MS && dt <= 3000) {
+    float instant = 60000.0f / (float)dt;
+
+    if (instant >= 20.0f && instant <= 400.0f) {
+      if (bpmFast < 1.0f) {
+        bpmFast = instant;
+        candidateBpm = 0.0f;
+        candidateCount = 0;
+      } else {
+        float ratio = instant / bpmFast;
+
+        // Normal tempo movement: accept quickly.
+        if (ratio > 0.70f && ratio < 1.45f) {
+          bpmFast = bpmFast * 0.35f + instant * 0.65f;
+          candidateBpm = 0.0f;
+          candidateCount = 0;
+        } else {
+          // Far jump: maybe a real tempo change, maybe bad pulse.
+          // Accept only if it repeats consistently.
+          if (candidateBpm < 1.0f) {
+            candidateBpm = instant;
+            candidateCount = 1;
+          } else {
+            float cr = instant / candidateBpm;
+
+            if (cr > 0.90f && cr < 1.10f) {
+              candidateBpm = candidateBpm * 0.50f + instant * 0.50f;
+              candidateCount++;
+
+              if (candidateCount >= 3) {
+                bpmFast = candidateBpm;
+                candidateBpm = 0.0f;
+                candidateCount = 0;
+              }
+            } else {
+              candidateBpm = instant;
+              candidateCount = 1;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!clockActive()) return 0.0f;
+  return bpmFast;
 }
 
 float clockPulseBrightness() {
   uint32_t since = clockMsSinceLastPulse();
   if (since == UINT32_MAX) return 0.0f;
 
-  // Decay window = one beat at the current tempo. Fall back to 60 BPM if we
-  // don't have enough samples yet — that gives a sensible visible blink even
-  // on the very first pulse.
   float bpm = clockBpm();
   if (bpm < 1.0f) bpm = 60.0f;
+
   uint32_t beatMs = (uint32_t)(60000.0f / bpm);
-  if (beatMs < 50) beatMs = 50;
+  if (beatMs < 80) beatMs = 80;
 
-  if (since >= beatMs) return 0.15f;     // dim floor between beats
+  if (since >= beatMs) return 0.15f;
 
-  // Quadratic ease-out so the bright peak is snappy, not sluggish.
   float t = 1.0f - (float)since / (float)beatMs;
   return 0.15f + 0.85f * t * t;
 }
