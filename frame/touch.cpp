@@ -1,57 +1,128 @@
 #include "touch.h"
 #include <Adafruit_FT6206.h>
 
-// `ts` is defined in gif_player_ui.ino (the FT6206 driver instance).
 extern Adafruit_FT6206 ts;
 
 TouchTracker touch;
 
+// ---- Touch filtering ----
+static const uint8_t TOUCH_PRESS_FRAMES   = 2;
+static const uint8_t TOUCH_RELEASE_FRAMES = 2;
+static const int     TOUCH_JITTER_PX      = 3;
+static const int     TOUCH_JUMP_REJECT_PX = 45;
+
+static bool readTouchPoint(int16_t &x, int16_t &y) {
+  if (ts.touched() <= 0) return false;
+
+  TS_Point p = ts.getPoint();
+
+  int16_t rx = p.x;
+  int16_t ry = p.y;
+
+  if (TOUCH_SWAP_XY) {
+    int16_t t = rx;
+    rx = ry;
+    ry = t;
+  }
+
+  if (TOUCH_FLIP_X) rx = SCREEN_W - 1 - rx;
+  if (TOUCH_FLIP_Y) ry = SCREEN_H - 1 - ry;
+
+  if (rx < 0 || rx >= SCREEN_W || ry < 0 || ry >= SCREEN_H) {
+    return false;
+  }
+
+  x = rx;
+  y = ry;
+  return true;
+}
+
 void updateTouch() {
   touch.tapped = false;
   touch.dragged = false;
-  touch.dragDX = touch.dragDY = 0;
+  touch.dragDX = 0;
+  touch.dragDY = 0;
 
-  bool isPressed = ts.touched() > 0;
-  int16_t mx = touch.prevX, my = touch.prevY;
+  int16_t mx = touch.curX;
+  int16_t my = touch.curY;
 
-  if (isPressed) {
-    TS_Point p = ts.getPoint();
-    int16_t rx = p.x;
-    int16_t ry = p.y;
-    if (TOUCH_SWAP_XY) { int16_t t = rx; rx = ry; ry = t; }
-    if (TOUCH_FLIP_X) rx = SCREEN_W - 1 - rx;
-    if (TOUCH_FLIP_Y) ry = SCREEN_H - 1 - ry;
-    mx = rx; my = ry;
+  bool rawPressed = readTouchPoint(mx, my);
+
+  if (rawPressed) {
+    if (touch.pressFrames < 255) touch.pressFrames++;
+    touch.releaseFrames = 0;
+  } else {
+    if (touch.releaseFrames < 255) touch.releaseFrames++;
+    touch.pressFrames = 0;
   }
 
-  if (isPressed && !touch.prevActive) {
-    // Touch began
+  bool stablePressed  = touch.pressFrames >= TOUCH_PRESS_FRAMES;
+  bool stableReleased = touch.releaseFrames >= TOUCH_RELEASE_FRAMES;
+
+  // Touch began.
+  if (stablePressed && !touch.prevActive) {
+    touch.prevActive = true;
+
     touch.startX = mx;
     touch.startY = my;
     touch.prevX = mx;
     touch.prevY = my;
+    touch.curX = mx;
+    touch.curY = my;
+
     touch.startMs = millis();
     touch.wasDrag = false;
-  } else if (isPressed && touch.prevActive) {
-    int16_t dx = mx - touch.prevX;
-    int16_t dy = my - touch.prevY;
-    int totalDist = abs(mx - touch.startX) + abs(my - touch.startY);
-    if (totalDist > TAP_DRAG_THRESHOLD_PX) {
-      touch.wasDrag = true;
-      touch.dragged = true;
-      touch.dragDX = dx;
-      touch.dragDY = dy;
-    }
-    touch.prevX = mx;
-    touch.prevY = my;
-  } else if (!isPressed && touch.prevActive) {
-    // Touch released — emit a tap if it was short and didn't move
-    if (!touch.wasDrag && (millis() - touch.startMs) < TAP_MAX_DURATION_MS) {
-      touch.tapped = true;
-      touch.tapX = touch.prevX;
-      touch.tapY = touch.prevY;
-    }
+    return;
   }
 
-  touch.prevActive = isPressed;
+  // Touch moved.
+  if (stablePressed && touch.prevActive) {
+    touch.curX = mx;
+    touch.curY = my;
+
+    int16_t dx = mx - touch.prevX;
+    int16_t dy = my - touch.prevY;
+
+    // Reject one-frame FT6206 coordinate jumps.
+    if (abs(dx) > TOUCH_JUMP_REJECT_PX || abs(dy) > TOUCH_JUMP_REJECT_PX) {
+      touch.prevX = mx;
+      touch.prevY = my;
+      return;
+    }
+
+    // Ignore tiny jitter.
+    if (abs(dx) <= TOUCH_JITTER_PX) dx = 0;
+    if (abs(dy) <= TOUCH_JITTER_PX) dy = 0;
+
+    int moveX = abs(mx - touch.startX);
+    int moveY = abs(my - touch.startY);
+    int totalMove = max(moveX, moveY);
+
+    if (totalMove > TAP_DRAG_THRESHOLD_PX) {
+      touch.wasDrag = true;
+
+      if (dx != 0 || dy != 0) {
+        touch.dragged = true;
+        touch.dragDX = dx;
+        touch.dragDY = dy;
+      }
+    }
+
+    touch.prevX = mx;
+    touch.prevY = my;
+    return;
+  }
+
+  // Touch released.
+  if (stableReleased && touch.prevActive) {
+    touch.prevActive = false;
+
+    if (!touch.wasDrag && (millis() - touch.startMs) < TAP_MAX_DURATION_MS) {
+      touch.tapped = true;
+
+      // Release point is better for selecting rows in lists.
+      touch.tapX = touch.startX;
+      touch.tapY = touch.startY;
+    }
+  }
 }
