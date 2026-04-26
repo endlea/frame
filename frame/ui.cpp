@@ -21,11 +21,12 @@ extern String playingName;
 // at the top — the rest of the screen is mostly screensaver. Buttons stay
 // near the bottom (175 / 250) so the saver has the largest possible area
 // between the title and the buttons.
-const Button BTN_SELECT   = { 20, 175, 200, 60, "SELECT GIF" };
-const Button BTN_OPTIONS  = { 20, 250, 200, 40, "OPTIONS" };
-const Button BTN_OVL_CONT = { 20,  90, 200, 60, "CONTINUE" };
-const Button BTN_OVL_PICK = { 20, 160, 200, 60, "PICK ANOTHER" };
-const Button BTN_OVL_MENU = { 20, 230, 200, 60, "MAIN MENU" };
+const Button BTN_SELECT    = { 20, 175, 200, 60, "SELECT GIF" };
+const Button BTN_OPTIONS   = { 20, 250, 200, 40, "OPTIONS" };
+const Button BTN_OVL_CONT  = { 20,  70, 200, 42, "CONTINUE" };
+const Button BTN_OVL_SPEED = { 20, 125, 200, 42, "SPEED / BPM" };
+const Button BTN_OVL_PICK  = { 20, 180, 200, 42, "PICK ANOTHER" };
+const Button BTN_OVL_MENU  = { 20, 235, 200, 42, "MAIN MENU" };
 
 // =================== Hit testing ===================
 bool inButton(const Button &b, int16_t x, int16_t y) {
@@ -235,10 +236,10 @@ void drawOverlay() {
   // Dim what's behind the overlay
   dimFrameBuffer();
 
-  // Three outlined buttons over the dimmed GIF frame.
-  drawButton(BTN_OVL_CONT, COLOR_BG, COLOR_FG);
-  drawButton(BTN_OVL_PICK, COLOR_BG, COLOR_FG);
-  drawButton(BTN_OVL_MENU, COLOR_BG, COLOR_FG);
+  drawButton(BTN_OVL_CONT,  COLOR_BG, COLOR_FG);
+  drawButton(BTN_OVL_SPEED, COLOR_BG, COLOR_ACCENT);
+  drawButton(BTN_OVL_PICK,  COLOR_BG, COLOR_FG);
+  drawButton(BTN_OVL_MENU,  COLOR_BG, COLOR_FG);
 
   tft.updateScreen();
 }
@@ -251,4 +252,43 @@ void dimFrameBuffer() {
   const uint32_t mask = 0x7BEF7BEFu;
   const int n = (SCREEN_W * SCREEN_H) / 2;
   for (int i = 0; i < n; i++) fb32[i] = (fb32[i] >> 1) & mask;
+}
+
+void drawSpeedScreen(float baseBpm, float currentBpm, float speedMul) {
+  // Compact bottom sheet. The live GIF stays visible above it.
+  // Logarithmic slider: 0.5x .. 1.0x .. 2.0x.
+  const int sheetY = 190;
+  const int sheetH = SCREEN_H - sheetY;
+
+  tft.fillRoundRect(8, sheetY, SCREEN_W - 16, sheetH - 8, 12, COLOR_BG);
+  tft.drawRoundRect(8, sheetY, SCREEN_W - 16, sheetH - 8, 12, COLOR_DIVIDER);
+
+  char bpmBuf[24];
+  snprintf(bpmBuf, sizeof(bpmBuf), "%.0f BPM", currentBpm);
+  drawCenteredText(bpmBuf, SCREEN_W / 2, sheetY + 24, 2, COLOR_ACCENT);
+
+  char subBuf[40];
+  snprintf(subBuf, sizeof(subBuf), "original %.0f BPM   %.2fx", baseBpm, speedMul);
+  drawCenteredText(subBuf, SCREEN_W / 2, sheetY + 48, 1, COLOR_DIM);
+
+  int railY = SPEED_SLIDER_Y + SPEED_SLIDER_H / 2;
+  tft.drawFastHLine(SPEED_SLIDER_X, railY, SPEED_SLIDER_W, COLOR_DIM);
+
+  int centerX = SPEED_SLIDER_X + SPEED_SLIDER_W / 2;
+  tft.drawFastVLine(centerX, railY - 13, 27, COLOR_FG);
+  drawCenteredText("1x", centerX, railY + 24, 1, COLOR_DIM);
+
+  float pos = logf(speedMul / GIF_SPEED_MIN) / logf(GIF_SPEED_MAX / GIF_SPEED_MIN);
+  if (pos < 0.0f) pos = 0.0f;
+  if (pos > 1.0f) pos = 1.0f;
+
+  int knobX = SPEED_SLIDER_X + (int)(pos * SPEED_SLIDER_W);
+
+  tft.fillCircle(knobX, railY, 9, COLOR_ACCENT);
+  tft.drawCircle(knobX, railY, 11, COLOR_FG);
+
+  // Explicit RESET button. Tap outside the sheet = DONE.
+  tft.fillRoundRect(76, 288, 88, 24, 7, COLOR_BG);
+  tft.drawRoundRect(76, 288, 88, 24, 7, COLOR_ACCENT);
+  drawCenteredText("RESET", SCREEN_W / 2, 300, 1, COLOR_ACCENT);
 }

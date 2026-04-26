@@ -92,3 +92,12 @@ static const uint32_t IDLE_TIMEOUT_MS = 30000;     // 30s
 // =================== Touch tuning ===================
 static const int   TAP_DRAG_THRESHOLD_PX = 18;     // movement above this counts as drag, not tap
 static const uint32_t TAP_MAX_DURATION_MS = 800;   // long press above this is no longer a tap
+
+// =================== GIF speed / BPM screen ===================
+static const float GIF_SPEED_MIN = 0.50f;
+static const float GIF_SPEED_MAX = 2.00f;
+
+static const int SPEED_SLIDER_X = 24;
+static const int SPEED_SLIDER_Y = 238;
+static const int SPEED_SLIDER_W = 192;
+static const int SPEED_SLIDER_H = 34;
