@@ -2,6 +2,7 @@
 #include "gif_engine.h"     // fileNames, fileCount
 #include "screensaver.h"    // currentSaver, saverName, SAVER_COUNT
 #include "theme.h"          // currentUiColor, uiColorName, UI_COLOR_COUNT
+#include "clock_input.h"    // clockActive, clockBpm, clockPulseBrightness
 #include <ILI9341_t3n.h>
 
 // `tft` is defined in gif_player_ui.ino.
@@ -44,6 +45,24 @@ void drawCenteredText(const char *s, int16_t cx, int16_t cy, uint8_t size, uint1
   tft.print(s);
 }
 
+// Linear interpolation between two RGB565 colours, per channel. t is clamped
+// to 0..1. Used by the CLOCK indicator to fade between DIM and ACCENT on
+// every clock pulse.
+static uint16_t lerpColor565(uint16_t a, uint16_t b, float t) {
+  if (t < 0.0f) t = 0.0f;
+  if (t > 1.0f) t = 1.0f;
+  int ar = (a >> 11) & 0x1F;
+  int ag = (a >> 5)  & 0x3F;
+  int ab =  a        & 0x1F;
+  int br = (b >> 11) & 0x1F;
+  int bg = (b >> 5)  & 0x3F;
+  int bb =  b        & 0x1F;
+  int r  = ar + (int)((br - ar) * t);
+  int g  = ag + (int)((bg - ag) * t);
+  int bl = ab + (int)((bb - ab) * t);
+  return (uint16_t)((r << 11) | (g << 5) | bl);
+}
+
 void drawButton(const Button &b, uint16_t bg, uint16_t fg) {
   tft.fillRoundRect(b.x, b.y, b.w, b.h, 8, bg);
   tft.drawRoundRect(b.x, b.y, b.w, b.h, 8, fg);
@@ -71,6 +90,40 @@ void drawMenuChrome() {
   char buf[40];
   snprintf(buf, sizeof(buf), "%d gif%s on /gifs", fileCount, fileCount == 1 ? "" : "s");
   drawCenteredText(buf, SCREEN_W / 2, 38, 1, COLOR_DIM);
+
+  // ---- CLOCK indicator (top-right of the title band) ----
+  // Shown only when an external eurorack clock is feeding pulses into
+  // CLOCK_INPUT_PIN. Two lines of size-1 text, right-aligned:
+  //   line 1: "CLOCK"  — colour lerps DIM ↔ ACCENT on every pulse
+  //   line 2: "NNNBPM" — current median-smoothed BPM
+  // The brightness pulses match the clock's tempo (peak right after each
+  // pulse, fade over one beat), so visually the label feels like a tiny
+  // blinking LED that keeps time with the source.
+  if (clockActive()) {
+    float br = clockPulseBrightness();
+    uint16_t pulseColor = lerpColor565(COLOR_DIM, COLOR_ACCENT, br);
+
+    // "CLOCK" — 5 chars × 6 px = 30 px wide.
+    const int rightPad = 6;
+    tft.setTextSize(1);
+    tft.setTextColor(pulseColor);
+    tft.setCursor(SCREEN_W - rightPad - 30, 8);
+    tft.print("CLOCK");
+
+    // BPM number, e.g. "120 BPM". Always-dim so only the label pulses; the
+    // number reads as a stable readout under the blinking title.
+    char bpmBuf[12];
+    float bpm = clockBpm();
+    if (bpm >= 1.0f) {
+      snprintf(bpmBuf, sizeof(bpmBuf), "%3.0f BPM", bpm);
+    } else {
+      snprintf(bpmBuf, sizeof(bpmBuf), "-- BPM");
+    }
+    int textW = (int)strlen(bpmBuf) * 6;
+    tft.setTextColor(COLOR_DIM);
+    tft.setCursor(SCREEN_W - rightPad - textW, 22);
+    tft.print(bpmBuf);
+  }
 
   // Outlined buttons over the saver. Both use COLOR_BG fill + COLOR_FG text
   // (BTN_SELECT) / COLOR_DIM text (BTN_OPTIONS). The outline keeps the saver

@@ -73,6 +73,7 @@
 #include "touch.h"
 #include "gif_engine.h"
 #include "screensaver.h"
+#include "clock_input.h"
 
 // =================== Hardware globals ===================
 // These are referenced from other modules via `extern` — see touch.cpp,
@@ -167,6 +168,11 @@ void setup() {
   gif.begin(LITTLE_ENDIAN_PIXELS);
 
   scanGifFolder();
+
+  // External eurorack clock input — ISR-driven. See clock_input.cpp for
+  // wiring. After this call, clockActive()/clockBpm() reflect live state at
+  // any time; we don't have to poll anything.
+  initClockInput();
 
   for (int i = 0; i < MAX_FILES; i++) {
     gifSpeedMul[i] = 1.0f;

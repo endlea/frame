@@ -101,3 +101,22 @@ static const int SPEED_SLIDER_X = 24;
 static const int SPEED_SLIDER_Y = 238;
 static const int SPEED_SLIDER_W = 192;
 static const int SPEED_SLIDER_H = 34;
+
+// =================== Eurorack CLOCK input (mono jack) ===================
+// External clock pulse via 3.5mm Thonkiconn. Tip → voltage divider → this pin,
+// sleeve → GND. See clock_input.cpp for wiring & math notes.
+//
+// Pin 2 is free in this project (display uses 8..13, FT6206 uses 18/19, SD is
+// internal) and supports interrupts. Any other free digital pin is fine; just
+// update CLOCK_INPUT_PIN.
+//
+// Teensy 4.x pins are NOT 5V tolerant — use the divider on the input.
+#define CLOCK_INPUT_PIN 2
+
+// Reject pulses that arrive faster than this — covers contact bounce and
+// stray spikes. 5 ms = effective ceiling of 12000 BPM at 1 PPQN, way above
+// anything musical.
+static const uint32_t CLOCK_DEBOUNCE_MS = 5;
+
+// If no pulse in this long, the CLOCK indicator hides (signal "lost").
+static const uint32_t CLOCK_TIMEOUT_MS = 3000;
