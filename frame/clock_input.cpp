@@ -32,8 +32,12 @@
 
 // ---- Tunables ----
 // Length of the timestamp ring. N+1 timestamps → N intervals between them.
-// 6 is enough for a stable median without lagging too much when BPM changes.
-static const int N_INTERVALS = 6;
+// We only use the most recent interval for the BPM readout (max-snappy: tempo
+// changes show up on the very next pulse). The ring is kept at 2 just so we
+// always have one prev timestamp to subtract from. Pamela-class digital
+// clocks have ≤ ±1 ms jitter, way below the BPM display granularity, so no
+// smoothing is needed for a clean readout.
+static const int N_INTERVALS = 2;
 
 // ---- ISR-shared state ----
 // Ring of millis() at each accepted rising edge, oldest → newest.
@@ -80,48 +84,43 @@ uint32_t clockMsSinceLastPulse() {
 }
 
 bool clockActive() {
-  return clockMsSinceLastPulse() < CLOCK_TIMEOUT_MS;
+  uint32_t since = clockMsSinceLastPulse();
+  if (since == UINT32_MAX) return false;
+
+  // Adaptive timeout: declare the clock dead ~1.5 beats after the last pulse
+  // at the currently detected tempo. This way the indicator disappears
+  // promptly when the clock stops, regardless of BPM, without flickering
+  // between pulses at fast tempos.
+  //   * floor 400 ms — keeps tempos above ~225 BPM from killing the indicator
+  //     in the gap between two consecutive pulses
+  //   * ceiling CLOCK_TIMEOUT_MS — also used as fallback when we don't have
+  //     a tempo yet (only one pulse seen so far)
+  float bpm = clockBpm();
+  uint32_t timeout;
+  if (bpm > 1.0f) {
+    timeout = (uint32_t)(60000.0f / bpm) * 3 / 2;
+    if (timeout < 400) timeout = 400;
+    if (timeout > CLOCK_TIMEOUT_MS) timeout = CLOCK_TIMEOUT_MS;
+  } else {
+    timeout = CLOCK_TIMEOUT_MS;
+  }
+  return since < timeout;
 }
 
 float clockBpm() {
-  // Snapshot the ring under interrupts-off so we don't see a torn write.
-  uint32_t snap[N_INTERVALS + 1];
-  uint8_t  head;
-  uint8_t  cnt;
-
+  // Atomically grab the two most recent timestamps. We only need the latest
+  // interval — that's what makes the readout react on the very next pulse.
   noInterrupts();
-  cnt  = pulseCount;
-  head = pulseHead;
-  for (int i = 0; i <= N_INTERVALS; i++) snap[i] = pulseTimes[i];
+  uint8_t  cnt  = pulseCount;
+  uint8_t  head = pulseHead;
+  uint32_t last = pulseTimes[head];
+  uint32_t prev = pulseTimes[(head + (N_INTERVALS + 1) - 1) % (N_INTERVALS + 1)];
   interrupts();
 
-  // Need at least 2 timestamps for one interval.
   if (cnt < 2) return 0.0f;
-
-  // Walk back from `head` and produce up to N_INTERVALS intervals.
-  int avail = (cnt > (uint8_t)N_INTERVALS) ? N_INTERVALS : (cnt - 1);
-  uint32_t intervals[N_INTERVALS];
-  int idx = head;
-  for (int i = 0; i < avail; i++) {
-    int prev = (idx + (N_INTERVALS + 1) - 1) % (N_INTERVALS + 1);
-    intervals[i] = snap[idx] - snap[prev];
-    idx = prev;
-  }
-
-  // Insertion sort — `avail` is at most N_INTERVALS = 6, fine.
-  for (int i = 1; i < avail; i++) {
-    uint32_t v = intervals[i];
-    int j = i - 1;
-    while (j >= 0 && intervals[j] > v) {
-      intervals[j + 1] = intervals[j];
-      j--;
-    }
-    intervals[j + 1] = v;
-  }
-
-  uint32_t medMs = intervals[avail / 2];
-  if (medMs == 0) return 0.0f;
-  return 60000.0f / (float)medMs;
+  uint32_t dt = last - prev;
+  if (dt == 0) return 0.0f;
+  return 60000.0f / (float)dt;
 }
 
 float clockPulseBrightness() {
