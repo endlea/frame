@@ -1,6 +1,5 @@
-// fractals.cpp — safe themed Mandelbrot deep zoom.
-// Always zooms inward. If the view becomes almost black,
-// it silently jumps to another target from darkness.
+// fractals.cpp — stable themed Mandelbrot breathing zoom.
+// Full-frame render every step: no stripes, no partial redraw glitches.
 
 #include "../config.h"
 #include "internal.h"
@@ -11,33 +10,35 @@
 extern ILI9341_t3n tft;
 
 // ---- Tunables ----
-static const int    FR_SCALE      = 2;
-static const int    FR_MAX_ITER   = 72;
-static const double FR_ZOOM_STEP  = 1.012;
+static const int FR_SCALE    = 2;
+static const int FR_MAX_ITER = 76;
 
-// Mandelbrot zoom targets.
-static const double FR_TARGET_XS[] = {
-  -0.743643887037151,
-  -0.761574,
-  -0.101096,
-  -1.25066,
-  -0.15652
-};
+static const int FR_DIVE_FRAMES = 420;
+static const int FR_PULL_FRAMES = 170;
 
-static const double FR_TARGET_YS[] = {
-   0.131825904205330,
-  -0.0847596,
-   0.956286,
-   0.02012,
-   1.03225
-};
+static const double FR_MIN_ZOOM = 1.25;
+static const double FR_MAX_ZOOM = 2600.0;
 
-static const int FR_N_TARGETS = sizeof(FR_TARGET_XS) / sizeof(FR_TARGET_XS[0]);
+// Seahorse Valley.
+static const double FR_BASE_X = -0.743643887037151;
+static const double FR_BASE_Y =  0.131825904205330;
 
-static int    fr_target = 0;
-static int    fr_blackFrames = 0;
-static double fr_zoom = 1.0;
+static int fr_frame = 0;
+static bool fr_pulling = false;
+
 static double fr_t = 0.0;
+static double fr_angle = 0.0;
+
+static double fr_centerX = FR_BASE_X;
+static double fr_centerY = FR_BASE_Y;
+
+static inline double frEase(double t) {
+  if (t < 0.0) t = 0.0;
+  if (t > 1.0) t = 1.0;
+
+  // smootherstep
+  return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
 
 static inline uint16_t frBlend565(uint16_t a, uint16_t b, uint8_t amount) {
   uint8_t ar = (a >> 11) & 0x1F;
@@ -60,8 +61,6 @@ static uint16_t frColor(int iter) {
 
   uint8_t v = (uint8_t)((iter * 255) / FR_MAX_ITER);
 
-  // Theme-safe palette only:
-  // BG -> ACCENT -> FG. No raw white/blue constants.
   if (v < 120) {
     return frBlend565(COLOR_BG, COLOR_ACCENT, (uint8_t)(v * 2));
   }
@@ -69,17 +68,28 @@ static uint16_t frColor(int iter) {
   return frBlend565(COLOR_ACCENT, COLOR_FG, (uint8_t)((v - 120) * 2));
 }
 
+static double frCurrentZoom() {
+  double p;
+
+  if (!fr_pulling) {
+    p = frEase((double)fr_frame / (double)FR_DIVE_FRAMES);
+  } else {
+    p = 1.0 - frEase((double)fr_frame / (double)FR_PULL_FRAMES);
+  }
+
+  return FR_MIN_ZOOM * pow(FR_MAX_ZOOM / FR_MIN_ZOOM, p);
+}
+
 static uint16_t frMandelPixel(int px, int py) {
+  double zoom = frCurrentZoom();
   double aspect = (double)SCREEN_W / (double)SCREEN_H;
-  double view = 3.0 / fr_zoom;
+  double view = 3.0 / zoom;
 
-  double drift = view * 0.018;
+  double cx = fr_centerX +
+              (((double)px / (double)SCREEN_W) - 0.5) * view * aspect;
 
-  double centerX = FR_TARGET_XS[fr_target] + drift * sin(fr_t * 0.011);
-  double centerY = FR_TARGET_YS[fr_target] + drift * cos(fr_t * 0.013);
-
-  double cx = centerX + (((double)px / SCREEN_W) - 0.5) * view * aspect;
-  double cy = centerY + (((double)py / SCREEN_H) - 0.5) * view;
+  double cy = fr_centerY +
+              (((double)py / (double)SCREEN_H) - 0.5) * view;
 
   double x = 0.0;
   double y = 0.0;
@@ -96,51 +106,45 @@ static uint16_t frMandelPixel(int px, int py) {
   return frColor(iter);
 }
 
-static void frNextTarget() {
-  fr_target = (fr_target + 1) % FR_N_TARGETS;
-  fr_zoom = 1.0;
-  fr_blackFrames = 0;
-  fr_t += 37.0;
+static void frNextNearbyPoint() {
+  // Small movement around Seahorse Valley. Too large = black interior/glitch.
+  fr_angle += 0.61;
 
-  tft.fillScreen(COLOR_BG);
+  double r = 0.0018 + 0.0011 * sin(fr_angle * 0.9);
+
+  fr_centerX = FR_BASE_X + r * cos(fr_angle);
+  fr_centerY = FR_BASE_Y + r * sin(fr_angle * 1.2);
 }
 
 void initFractals() {
-  fr_target = 0;
-  fr_blackFrames = 0;
-  fr_zoom = 1.0;
+  fr_frame = 0;
+  fr_pulling = false;
+
   fr_t = 0.0;
+  fr_angle = 0.0;
+
+  fr_centerX = FR_BASE_X;
+  fr_centerY = FR_BASE_Y;
 
   tft.fillScreen(COLOR_BG);
 }
 
 void stepFractals() {
   fr_t += 1.0;
-  fr_zoom *= FR_ZOOM_STEP;
+  fr_frame++;
 
-  int blackCount = 0;
-  int totalCount = 0;
+  if (!fr_pulling && fr_frame >= FR_DIVE_FRAMES) {
+    fr_frame = 0;
+    fr_pulling = true;
+  } else if (fr_pulling && fr_frame >= FR_PULL_FRAMES) {
+    fr_frame = 0;
+    fr_pulling = false;
+    frNextNearbyPoint();
+  }
 
   for (int y = 0; y < SCREEN_H; y += FR_SCALE) {
     for (int x = 0; x < SCREEN_W; x += FR_SCALE) {
-      uint16_t c = frMandelPixel(x, y);
-
-      if (c == COLOR_BG) blackCount++;
-      totalCount++;
-
-      tft.fillRect(x, y, FR_SCALE, FR_SCALE, c);
+      tft.fillRect(x, y, FR_SCALE, FR_SCALE, frMandelPixel(x, y));
     }
-  }
-
-  // If the image has collapsed into mostly interior black,
-  // wait a few frames, then start another inward dive.
-  if (blackCount > totalCount * 85 / 100) {
-    fr_blackFrames++;
-  } else {
-    fr_blackFrames = 0;
-  }
-
-  if (fr_blackFrames > 8) {
-    frNextTarget();
   }
 }

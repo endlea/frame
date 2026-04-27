@@ -74,7 +74,10 @@ static const int OPTIONS_SAVER_BOTTOM  = OPTIONS_SAVER_TOP + SAVER_COUNT * OPTIO
 static const int OPTIONS_COLOR_TOP     = OPTIONS_SAVER_BOTTOM + OPTIONS_LABEL_H;
 static const int OPTIONS_COLOR_BOTTOM  = OPTIONS_COLOR_TOP + UI_COLOR_COUNT * OPTIONS_ITEM_H;
 
-static const int OPTIONS_CONTENT_H     = OPTIONS_COLOR_BOTTOM;
+static const int OPTIONS_CLOCK_TOP     = OPTIONS_COLOR_BOTTOM + OPTIONS_LABEL_H;
+static const int OPTIONS_CLOCK_BOTTOM  = OPTIONS_CLOCK_TOP + OPTIONS_ITEM_H;
+
+static const int OPTIONS_CONTENT_H     = OPTIONS_CLOCK_BOTTOM;
 
 // =================== Menu animation ===================
 // Cap at ~25ms (≈40fps target). Real cap is the ILI9341 DMA push (~25ms for
@@ -92,3 +95,34 @@ static const uint32_t IDLE_TIMEOUT_MS = 30000;     // 30s
 // =================== Touch tuning ===================
 static const int   TAP_DRAG_THRESHOLD_PX = 18;     // movement above this counts as drag, not tap
 static const uint32_t TAP_MAX_DURATION_MS = 800;   // long press above this is no longer a tap
+
+// =================== GIF speed / BPM screen ===================
+static const float GIF_SPEED_MIN = 0.50f;
+static const float GIF_SPEED_MAX = 2.00f;
+
+static const int SPEED_SLIDER_X = 24;
+static const int SPEED_SLIDER_Y = 238;
+static const int SPEED_SLIDER_W = 192;
+static const int SPEED_SLIDER_H = 34;
+
+// =================== Clock sync ===================
+static const int CLOCK_SYNC_RATIO_COUNT = 5;
+
+// =================== Eurorack CLOCK input (mono jack) ===================
+// External clock pulse via 3.5mm Thonkiconn. Tip → voltage divider → this pin,
+// sleeve → GND. See clock_input.cpp for wiring & math notes.
+//
+// Pin 2 is free in this project (display uses 8..13, FT6206 uses 18/19, SD is
+// internal) and supports interrupts. Any other free digital pin is fine; just
+// update CLOCK_INPUT_PIN.
+//
+// Teensy 4.x pins are NOT 5V tolerant — use the divider on the input.
+#define CLOCK_INPUT_PIN 2
+
+// Reject pulses that arrive faster than this — covers contact bounce and
+// stray spikes. 5 ms = effective ceiling of 12000 BPM at 1 PPQN, way above
+// anything musical.
+static const uint32_t CLOCK_DEBOUNCE_MS = 25;
+
+// If no pulse in this long, the CLOCK indicator hides (signal "lost").
+static const uint32_t CLOCK_TIMEOUT_MS = 3000;

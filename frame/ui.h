@@ -13,6 +13,7 @@ struct Button {
 extern const Button BTN_SELECT;
 extern const Button BTN_OPTIONS;
 extern const Button BTN_OVL_CONT;
+extern const Button BTN_OVL_SPEED;
 extern const Button BTN_OVL_PICK;
 extern const Button BTN_OVL_MENU;
 
@@ -24,21 +25,14 @@ void drawCenteredText(const char *s, int16_t cx, int16_t cy, uint8_t size, uint1
 void drawButton(const Button &b, uint16_t bg, uint16_t fg);
 
 // ---- Full-screen views ----
-// Draws the static parts of the main menu (title strip, status, buttons) on
-// top of the live screensaver framebuffer. Does NOT call fillScreen or
-// updateScreen — caller is responsible. Call once on enterMenu() and again
-// on every animation frame so the chrome always sits on top of the saver.
 void drawMenuChrome();
-
-// Repaints just the regions drawMenuChrome() covers back to COLOR_BG, leaving
-// the rest of the framebuffer (the live screensaver) untouched. Used by the
-// active→idle transition so the chrome "melts away" without resetting the
-// saver's particle state.
 void clearMenuChrome();
 
 void drawBrowser();
 void drawOverlay();
 void drawOptions();
+void drawSpeedScreen(float baseBpm, float currentBpm, float speedMul);
+void drawClockSpeedScreen(float baseBpm, float clockBpm, float ratio, const char *ratioLabel);
+void drawSyncToast(const char *text);
 
-// Halve every channel of every pixel in the framebuffer (RGB565 fast pass).
 void dimFrameBuffer();

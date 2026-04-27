@@ -2,6 +2,7 @@
 #include "gif_engine.h"     // fileNames, fileCount
 #include "screensaver.h"    // currentSaver, saverName, SAVER_COUNT
 #include "theme.h"          // currentUiColor, uiColorName, UI_COLOR_COUNT
+#include "clock_input.h"    // clockActive, clockBpm, clockPulseBrightness
 #include <ILI9341_t3n.h>
 
 // `tft` is defined in gif_player_ui.ino.
@@ -15,17 +16,19 @@ extern uint16_t fbBackup[];
 extern int browserScrollY;
 extern int optionsScrollY;
 extern String playingName;
+extern bool clockSyncEnabled;
 
 // =================== Button instances ===================
 // Layout note: with the redesign, the title is now a thin TITLE_BAND_H strip
 // at the top — the rest of the screen is mostly screensaver. Buttons stay
 // near the bottom (175 / 250) so the saver has the largest possible area
 // between the title and the buttons.
-const Button BTN_SELECT   = { 20, 175, 200, 60, "SELECT GIF" };
-const Button BTN_OPTIONS  = { 20, 250, 200, 40, "OPTIONS" };
-const Button BTN_OVL_CONT = { 20,  90, 200, 60, "CONTINUE" };
-const Button BTN_OVL_PICK = { 20, 160, 200, 60, "PICK ANOTHER" };
-const Button BTN_OVL_MENU = { 20, 230, 200, 60, "MAIN MENU" };
+const Button BTN_SELECT    = { 20, 175, 200, 60, "SELECT GIF" };
+const Button BTN_OPTIONS   = { 20, 250, 200, 40, "OPTIONS" };
+const Button BTN_OVL_CONT  = { 20,  70, 200, 42, "CONTINUE" };
+const Button BTN_OVL_SPEED = { 20, 125, 200, 42, "SPEED / BPM" };
+const Button BTN_OVL_PICK  = { 20, 180, 200, 42, "PICK ANOTHER" };
+const Button BTN_OVL_MENU  = { 20, 235, 200, 42, "MAIN MENU" };
 
 // =================== Hit testing ===================
 bool inButton(const Button &b, int16_t x, int16_t y) {
@@ -41,6 +44,24 @@ void drawCenteredText(const char *s, int16_t cx, int16_t cy, uint8_t size, uint1
   int16_t h = 8 * size;
   tft.setCursor(cx - w / 2, cy - h / 2);
   tft.print(s);
+}
+
+// Linear interpolation between two RGB565 colours, per channel. t is clamped
+// to 0..1. Used by the CLOCK indicator to fade between DIM and ACCENT on
+// every clock pulse.
+static uint16_t lerpColor565(uint16_t a, uint16_t b, float t) {
+  if (t < 0.0f) t = 0.0f;
+  if (t > 1.0f) t = 1.0f;
+  int ar = (a >> 11) & 0x1F;
+  int ag = (a >> 5)  & 0x3F;
+  int ab =  a        & 0x1F;
+  int br = (b >> 11) & 0x1F;
+  int bg = (b >> 5)  & 0x3F;
+  int bb =  b        & 0x1F;
+  int r  = ar + (int)((br - ar) * t);
+  int g  = ag + (int)((bg - ag) * t);
+  int bl = ab + (int)((bb - ab) * t);
+  return (uint16_t)((r << 11) | (g << 5) | bl);
 }
 
 void drawButton(const Button &b, uint16_t bg, uint16_t fg) {
@@ -70,6 +91,40 @@ void drawMenuChrome() {
   char buf[40];
   snprintf(buf, sizeof(buf), "%d gif%s on /gifs", fileCount, fileCount == 1 ? "" : "s");
   drawCenteredText(buf, SCREEN_W / 2, 38, 1, COLOR_DIM);
+
+  // ---- CLOCK indicator (top-right of the title band) ----
+  // Shown only when an external eurorack clock is feeding pulses into
+  // CLOCK_INPUT_PIN. Two lines of size-1 text, right-aligned:
+  //   line 1: "CLOCK"  — colour lerps DIM ↔ ACCENT on every pulse
+  //   line 2: "NNNBPM" — current median-smoothed BPM
+  // The brightness pulses match the clock's tempo (peak right after each
+  // pulse, fade over one beat), so visually the label feels like a tiny
+  // blinking LED that keeps time with the source.
+  if (clockActive()) {
+    float br = clockPulseBrightness();
+    uint16_t pulseColor = lerpColor565(COLOR_DIM, COLOR_ACCENT, br);
+
+    // "CLOCK" — 5 chars × 6 px = 30 px wide.
+    const int rightPad = 6;
+    tft.setTextSize(1);
+    tft.setTextColor(pulseColor);
+    tft.setCursor(SCREEN_W - rightPad - 30, 8);
+    tft.print("CLOCK");
+
+    // BPM number, e.g. "120 BPM". Always-dim so only the label pulses; the
+    // number reads as a stable readout under the blinking title.
+    char bpmBuf[12];
+    float bpm = clockBpm();
+    if (bpm >= 1.0f) {
+      snprintf(bpmBuf, sizeof(bpmBuf), "%3.0f BPM", bpm);
+    } else {
+      snprintf(bpmBuf, sizeof(bpmBuf), "-- BPM");
+    }
+    int textW = (int)strlen(bpmBuf) * 6;
+    tft.setTextColor(COLOR_DIM);
+    tft.setCursor(SCREEN_W - rightPad - textW, 22);
+    tft.print(bpmBuf);
+  }
 
   // Outlined buttons over the saver. Both use COLOR_BG fill + COLOR_FG text
   // (BTN_SELECT) / COLOR_DIM text (BTN_OPTIONS). The outline keeps the saver
@@ -137,6 +192,31 @@ static void drawOptionsRow(int yViewport, const char *label, bool isActive) {
   tft.print(label);
 }
 
+static void drawOptionsToggleRow(int yViewport, const char *label, bool isOn) {
+  if (yViewport >= SCREEN_H || yViewport + OPTIONS_ITEM_H <= HEADER_H) return;
+
+  tft.fillRect(0, yViewport, SCREEN_W, OPTIONS_ITEM_H, COLOR_BG);
+  tft.drawFastHLine(0, yViewport + OPTIONS_ITEM_H - 1, SCREEN_W, COLOR_DIVIDER);
+
+  tft.setTextColor(COLOR_FG);
+  tft.setTextSize(2);
+  tft.setCursor(15, yViewport + (OPTIONS_ITEM_H - 16) / 2);
+  tft.print(label);
+
+  const int swW = 46;
+  const int swH = 22;
+  const int swX = SCREEN_W - swW - 15;
+  const int swY = yViewport + (OPTIONS_ITEM_H - swH) / 2;
+
+  uint16_t outline = isOn ? COLOR_ACCENT : COLOR_DIM;
+  uint16_t knob    = isOn ? COLOR_ACCENT : COLOR_DIM;
+
+  tft.drawRoundRect(swX, swY, swW, swH, swH / 2, outline);
+
+  int knobX = isOn ? swX + swW - swH + 2 : swX + 2;
+  tft.fillCircle(knobX + swH / 2 - 2, swY + swH / 2, 7, knob);
+}
+
 void drawOptions() {
   tft.fillScreen(COLOR_BG);
 
@@ -161,6 +241,13 @@ void drawOptions() {
                    uiColorName((UiColor)i),
                    (UiColor)i == currentUiColor);
   }
+
+  // CLOCK section label.
+  drawSectionLabel("CLOCK", listTop + OPTIONS_COLOR_BOTTOM - optionsScrollY);
+
+  drawOptionsToggleRow(listTop + OPTIONS_CLOCK_TOP - optionsScrollY,
+                       "CLOCK SYNC",
+                       clockSyncEnabled);
 
   // Header (drawn last so any rows that scrolled under it get clipped away).
   tft.fillRect(0, 0, SCREEN_W, HEADER_H, COLOR_BG);
@@ -235,10 +322,10 @@ void drawOverlay() {
   // Dim what's behind the overlay
   dimFrameBuffer();
 
-  // Three outlined buttons over the dimmed GIF frame.
-  drawButton(BTN_OVL_CONT, COLOR_BG, COLOR_FG);
-  drawButton(BTN_OVL_PICK, COLOR_BG, COLOR_FG);
-  drawButton(BTN_OVL_MENU, COLOR_BG, COLOR_FG);
+  drawButton(BTN_OVL_CONT,  COLOR_BG, COLOR_FG);
+  drawButton(BTN_OVL_SPEED, COLOR_BG, COLOR_ACCENT);
+  drawButton(BTN_OVL_PICK,  COLOR_BG, COLOR_FG);
+  drawButton(BTN_OVL_MENU,  COLOR_BG, COLOR_FG);
 
   tft.updateScreen();
 }
@@ -251,4 +338,84 @@ void dimFrameBuffer() {
   const uint32_t mask = 0x7BEF7BEFu;
   const int n = (SCREEN_W * SCREEN_H) / 2;
   for (int i = 0; i < n; i++) fb32[i] = (fb32[i] >> 1) & mask;
+}
+
+void drawSpeedScreen(float baseBpm, float currentBpm, float speedMul) {
+  // Compact bottom sheet. The live GIF stays visible above it.
+  // Logarithmic slider: 0.5x .. 1.0x .. 2.0x.
+  const int sheetY = 190;
+  const int sheetH = SCREEN_H - sheetY;
+
+  tft.fillRoundRect(8, sheetY, SCREEN_W - 16, sheetH - 8, 12, COLOR_BG);
+  tft.drawRoundRect(8, sheetY, SCREEN_W - 16, sheetH - 8, 12, COLOR_DIVIDER);
+
+  char bpmBuf[24];
+  snprintf(bpmBuf, sizeof(bpmBuf), "%.0f BPM", currentBpm);
+  drawCenteredText(bpmBuf, SCREEN_W / 2, sheetY + 24, 2, COLOR_ACCENT);
+
+  char subBuf[40];
+  snprintf(subBuf, sizeof(subBuf), "original %.0f BPM   %.2fx", baseBpm, speedMul);
+  drawCenteredText(subBuf, SCREEN_W / 2, sheetY + 48, 1, COLOR_DIM);
+
+  int railY = SPEED_SLIDER_Y + SPEED_SLIDER_H / 2;
+  tft.drawFastHLine(SPEED_SLIDER_X, railY, SPEED_SLIDER_W, COLOR_DIM);
+
+  int centerX = SPEED_SLIDER_X + SPEED_SLIDER_W / 2;
+  tft.drawFastVLine(centerX, railY - 13, 27, COLOR_FG);
+  drawCenteredText("1x", centerX, railY + 24, 1, COLOR_DIM);
+
+  float pos = logf(speedMul / GIF_SPEED_MIN) / logf(GIF_SPEED_MAX / GIF_SPEED_MIN);
+  if (pos < 0.0f) pos = 0.0f;
+  if (pos > 1.0f) pos = 1.0f;
+
+  int knobX = SPEED_SLIDER_X + (int)(pos * SPEED_SLIDER_W);
+
+  tft.fillCircle(knobX, railY, 9, COLOR_ACCENT);
+  tft.drawCircle(knobX, railY, 11, COLOR_FG);
+
+  // Explicit RESET button. Tap outside the sheet = DONE.
+  tft.fillRoundRect(76, 288, 88, 24, 7, COLOR_BG);
+  tft.drawRoundRect(76, 288, 88, 24, 7, COLOR_ACCENT);
+  drawCenteredText("RESET", SCREEN_W / 2, 300, 1, COLOR_ACCENT);
+}
+
+void drawClockSpeedScreen(float baseBpm, float clockBpmValue, float ratio, const char *ratioLabel) {
+  const int sheetY = 190;
+  const int sheetH = SCREEN_H - sheetY;
+
+  tft.fillRoundRect(8, sheetY, SCREEN_W - 16, sheetH - 8, 12, COLOR_BG);
+  tft.drawRoundRect(8, sheetY, SCREEN_W - 16, sheetH - 8, 12, COLOR_DIVIDER);
+
+  char bpmBuf[28];
+  snprintf(bpmBuf, sizeof(bpmBuf), "SYNC %.0f BPM", clockBpmValue);
+  drawCenteredText(bpmBuf, SCREEN_W / 2, sheetY + 24, 2, COLOR_ACCENT);
+
+  char subBuf[36];
+  snprintf(subBuf, sizeof(subBuf), "original %.0f BPM", baseBpm);
+  drawCenteredText(subBuf, SCREEN_W / 2, sheetY + 48, 1, COLOR_DIM);
+
+  // Ratio picker: clean, readable, no overlapping labels.
+  tft.drawRoundRect(36, 244, 168, 42, 10, COLOR_DIVIDER);
+
+  drawCenteredText("<", 58, 265, 2, COLOR_DIM);
+  drawCenteredText(ratioLabel, SCREEN_W / 2, 265, 2, COLOR_ACCENT);
+  drawCenteredText(">", 182, 265, 2, COLOR_DIM);
+
+  drawCenteredText("tap outside to close", SCREEN_W / 2, 304, 1, COLOR_DIM);
+}
+
+void drawSyncToast(const char *text) {
+  tft.setTextSize(2);
+
+  int16_t w = strlen(text) * 6 * 2;
+  int16_t x = SCREEN_W / 2 - w / 2;
+  int16_t y = SCREEN_H / 2 - 8;
+
+  tft.setTextColor(COLOR_BG);
+  tft.setCursor(x + 1, y + 1);
+  tft.print(text);
+
+  tft.setTextColor(COLOR_ACCENT);
+  tft.setCursor(x, y);
+  tft.print(text);
 }
